@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 from rich.table import Table
 from rich.text import Text
 from textual import on
@@ -51,52 +49,74 @@ def _metric(title: str, value: str, detail: str = "") -> Text:
     return text
 
 
+def _traffic_color(fraction_of_peak: float, storage_fraction: float) -> str:
+    if storage_fraction > 1.0:
+        return RED
+    if fraction_of_peak >= 0.75:
+        return RED
+    if fraction_of_peak >= 0.45:
+        return YELLOW
+    return GREEN
+
+
 def _tile_map(snapshot: DashboardSnapshot) -> Text:
     hw = snapshot.hardware
-    p = snapshot.placement
-    if hw.tiles == 1:
-        load = p.max_estimated_storage_per_tile_bytes / p.tile_capacity_bytes
-        return Text.assemble(
-            ("T00 ", f"bold {ORANGE}"),
-            (f"{_pct(load, 0)} full  ", "bold"),
-            (f"{fmt_bytes(p.max_estimated_storage_per_tile_bytes)} / {fmt_bytes(p.tile_capacity_bytes)}", MUTED),
-        )
+    physical = snapshot.physical_placement
+    traffic = snapshot.traffic
 
-    rows = hw.mesh_rows or max(1, int(math.sqrt(hw.tiles)))
-    cols = hw.mesh_cols or math.ceil(hw.tiles / rows)
-    load = p.max_estimated_storage_per_tile_bytes / p.tile_capacity_bytes
-    color = GREEN if load < 0.75 else YELLOW if load <= 1.0 else RED
+    if hw.tiles == 1:
+        tile = physical.tiles[0]
+        load = tile.storage_bytes / physical.tile_capacity_bytes
+        text = Text.assemble(
+            (" T00 ", f"bold black on {GREEN if load <= 1.0 else RED}"),
+            (f" {_pct(load, 1)} full  ", "bold"),
+            (f"{fmt_bytes(tile.storage_bytes)} / {fmt_bytes(physical.tile_capacity_bytes)}", MUTED),
+        )
+        text.append("\nNo inter-tile traffic: the complete model is resident on one memory-compute tile.", style=MUTED)
+        return text
+
+    max_tx = max(traffic.tile_tx_bytes_per_token, default=0.0)
     text = Text()
-    tile = 0
-    for _row in range(rows):
-        for _col in range(cols):
-            if tile >= hw.tiles:
-                break
-            text.append(f" T{tile:02d} ", style=f"bold black on {color}")
-            text.append(f" {_pct(load, 0):>4} ", style="#d7dadd")
-            tile += 1
-        text.append("\n")
-    text.append(
-        f"Balanced M1 estimate: ~{fmt_bytes(p.max_estimated_storage_per_tile_bytes)} used of "
-        f"{fmt_bytes(p.tile_capacity_bytes)} per tile. Exact per-tile placement comes next.",
-        style=MUTED,
-    )
+    cols = hw.mesh_cols or hw.tiles
+    for tile in physical.tiles:
+        load = tile.storage_bytes / physical.tile_capacity_bytes
+        tx = traffic.tile_tx_bytes_per_token[tile.tile_id]
+        relative_tx = tx / max_tx if max_tx else 0.0
+        color = _traffic_color(relative_tx, load)
+        text.append(f" T{tile.tile_id:02d} ", style=f"bold black on {color}")
+        text.append(f"{_pct(load, 0):>4} ", style="#d7dadd")
+        if (tile.tile_id + 1) % cols == 0:
+            text.append("\n")
+
+    text.append("Cell text = storage utilization; cell color = relative TX traffic (green low, yellow medium, red hot).\n", style=MUTED)
+    if traffic.hottest_link is not None:
+        left, right = traffic.hottest_link
+        text.append("HOT LINK  ", style=f"bold {ORANGE}")
+        text.append(
+            f"T{left:02d}->T{right:02d}  {fmt_bytes(traffic.max_link_bytes_per_token)}/token  "
+            f"{traffic.hotspot_ratio:.2f}x mean active-link load",
+            style="bold",
+        )
+        if traffic.ideal_hottest_link_time_s is not None:
+            text.append(f"  ·  {fmt_time_s(traffic.ideal_hottest_link_time_s)} ideal serialization", style=MUTED)
     return text
 
 
 def _traffic_table(snapshot: DashboardSnapshot) -> Table:
     r = snapshot.result
-    p = snapshot.placement
+    traffic = snapshot.traffic
     table = Table(box=None, expand=True, pad_edge=False)
     table.add_column("FLOW", style=MUTED)
     table.add_column("PER TOKEN", justify="right")
     table.add_column("INTERPRETATION")
-    table.add_row("Active weights", fmt_bytes(r.active_weight_bytes_per_token), "Read locally beside compute")
-    table.add_row("Remote activations", fmt_bytes(r.remote_activation_bytes_per_token), "Cross the tile mesh")
-    table.add_row("Remote traffic share", _pct(snapshot.remote_traffic_fraction, 4), "Share of modeled bytes")
+    table.add_row("Active weights", fmt_bytes(r.active_weight_bytes_per_token), "Remain beside owning compute")
+    table.add_row("NoC payload", fmt_bytes(traffic.network_payload_bytes_per_token), "Actual M1 routed messages")
+    table.add_row("NoC hop-bytes", fmt_bytes(traffic.hop_bytes_per_token), "Payload × physical link hops")
+    table.add_row("NoC payload share", _pct(snapshot.remote_traffic_fraction, 4), "Versus weights + routed payload")
+    if snapshot.model.num_experts:
+        table.add_row("Remote expert calls", _pct(traffic.remote_expert_fraction, 2), "Measured from synthetic trace")
     if snapshot.hardware.tiles > 1:
-        table.add_row("Remote expert calls", _pct(p.expected_remote_expert_fraction, 2), "Calls, not weight bytes")
-        table.add_row("Average mesh hops", f"{p.average_hops:.3f}", "Naive balanced placement")
+        table.add_row("Average route", f"{traffic.average_hops:.3f} hops", f"{traffic.active_directed_links} directed links active")
     return table
 
 
@@ -132,7 +152,7 @@ def _comparison_table(snapshot: DashboardSnapshot) -> Table:
     model = snapshot.model
     bits = snapshot.result.bits_per_weight
     overhead = snapshot.result.quant_overhead_fraction
-    for key, hw in HARDWARE_PRESETS.items():
+    for hw in HARDWARE_PRESETS.values():
         remote_fraction = 0.0 if hw.tiles == 1 else 1.0 - (1.0 / hw.tiles)
         result = simulate_decode(
             model,
@@ -152,7 +172,7 @@ class AsicSimTui(App[None]):
     """Interactive architecture explorer for M0/M1 experiments."""
 
     TITLE = "ASIC-SIM // MEMORY-STATIONARY ARCHITECTURE EXPLORER"
-    SUB_TITLE = "M0 + early M1 — roofs, not silicon claims"
+    SUB_TITLE = "M0 + M1 physical mesh — roofs, not silicon claims"
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -360,14 +380,15 @@ class AsicSimTui(App[None]):
 
     def _render_snapshot(self, snapshot: DashboardSnapshot) -> None:
         r = snapshot.result
-        p = snapshot.placement
+        physical = snapshot.physical_placement
+        traffic = snapshot.traffic
 
-        if r.resident and p.resident_per_tile_balanced:
+        if r.resident and physical.per_tile_resident:
             verdict = Text("RESIDENT  ", style=f"bold black on {GREEN}")
-            verdict.append("  Model fits the system and the current balanced per-tile estimate.", style="bold")
+            verdict.append("  Model fits the system and the explicit M1 tile placement.", style="bold")
         elif r.resident:
             verdict = Text("TILE OVERFLOW  ", style=f"bold black on {YELLOW}")
-            verdict.append("  Total capacity fits, but the balanced tile estimate exceeds local tile capacity.", style="bold")
+            verdict.append("  Total capacity fits, but at least one explicit M1 tile overflows.", style="bold")
         else:
             verdict = Text("DOES NOT FIT  ", style=f"bold white on {RED}")
             verdict.append(
@@ -385,25 +406,30 @@ class AsicSimTui(App[None]):
         )
         self.query_one("#metric-tile", Static).update(
             _metric(
-                "Worst tile estimate",
-                f"{fmt_bytes(p.max_estimated_storage_per_tile_bytes)} / {fmt_bytes(p.tile_capacity_bytes)}",
+                "Hottest storage tile",
+                f"{fmt_bytes(physical.max_storage_bytes)} / {fmt_bytes(physical.tile_capacity_bytes)}",
                 f"{_pct(snapshot.tile_utilization, 1)} full",
             )
         )
         self.query_one("#metric-locality", Static).update(
-            _metric("Modeled bytes local", _pct(r.local_data_fraction, 4), "weights stay beside compute")
+            _metric("Modeled bytes local", _pct(1.0 - snapshot.remote_traffic_fraction, 4), "weights dominate modeled bytes")
         )
-        self.query_one("#metric-remote", Static).update(
-            _metric(
-                "Remote expert calls",
-                _pct(p.expected_remote_expert_fraction, 2),
-                f"but only {_pct(snapshot.remote_traffic_fraction, 4)} of bytes",
+        if snapshot.model.num_experts:
+            self.query_one("#metric-remote", Static).update(
+                _metric(
+                    "Remote expert calls",
+                    _pct(traffic.remote_expert_fraction, 2),
+                    f"NoC is {_pct(snapshot.remote_traffic_fraction, 4)} of bytes",
+                )
             )
-        )
+        else:
+            self.query_one("#metric-remote", Static).update(
+                _metric("NoC payload", fmt_bytes(traffic.network_payload_bytes_per_token) + "/tok", "dense layer-to-layer traffic")
+            )
 
         if r.resident:
             self.query_one("#metric-single", Static).update(
-                _metric("Single-stream roof", fmt_rate(r.single_stream_memory_noc_roofline_tps), "ideal memory + NoC only")
+                _metric("Single-stream roof", fmt_rate(r.single_stream_memory_noc_roofline_tps), "M0 ideal memory + NoC")
             )
             self.query_one("#metric-steady", Static).update(
                 _metric("Steady BW roof", fmt_rate(r.steady_state_memory_roofline_tps), "ideal pipelined upper bound")
@@ -412,14 +438,13 @@ class AsicSimTui(App[None]):
             self.query_one("#metric-single", Static).update(_metric("Single-stream roof", "—", "model is not resident"))
             self.query_one("#metric-steady", Static).update(_metric("Steady BW roof", "—", "model is not resident"))
 
-        traffic = Text("DATA MOVEMENT\n", style=f"bold {ORANGE}")
-        self.query_one("#traffic", Static).update(traffic + Text.from_markup("") if False else _traffic_table(snapshot))
-        self.query_one("#traffic", Static).border_title = "DATA MOVEMENT"
+        self.query_one("#traffic", Static).update(_traffic_table(snapshot))
+        self.query_one("#traffic", Static).border_title = f"M1 DATA MOVEMENT — {traffic.profile.upper()} / {traffic.tokens} TOKENS"
         self.query_one("#latency", Static).update(_latency_table(snapshot))
-        self.query_one("#latency", Static).border_title = "SINGLE-STREAM LATENCY FLOOR"
+        self.query_one("#latency", Static).border_title = "M0 SINGLE-STREAM LATENCY FLOOR"
 
         self.query_one("#tile-map", Static).update(_tile_map(snapshot))
-        self.query_one("#tile-map", Static).border_title = f"TILE MAP — {snapshot.hardware.tiles} TILE(S)"
+        self.query_one("#tile-map", Static).border_title = f"M1 PHYSICAL FABRIC — {snapshot.hardware.tiles} TILE(S)"
 
         self.query_one("#comparison", Static).update(_comparison_table(snapshot))
         self.query_one("#comparison", Static).border_title = f"{snapshot.model.name} — HARDWARE COMPARISON @ {r.bits_per_weight:g} BIT"
