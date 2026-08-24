@@ -4,6 +4,36 @@ Fast, multi-fidelity architecture simulator for **memory-stationary LLM inferenc
 
 The initial research target is a distributed compute + 3D-DRAM fabric: model weights remain resident beside compute tiles while token activations traverse an on-chip network. The project starts deliberately simple: reject bad architectural ideas in milliseconds before spending time on cycle-accurate simulation or RTL.
 
+## Interactive TUI
+
+The recommended interface is now the terminal UI. It runs directly inside the VS Code terminal and is intended to make the architecture understandable without reading raw simulator dumps.
+
+```bash
+python -m pip install -e ".[dev]"
+asic-sim tui
+```
+
+You can also launch it with:
+
+```bash
+asic-sim-tui
+```
+
+The TUI provides:
+
+- model, hardware, quantization and overhead selectors;
+- immediate fit / no-fit verdicts;
+- system and per-tile capacity utilization;
+- a clear distinction between **remote expert calls** and **remote data bytes**;
+- active-weight versus activation traffic;
+- ideal single-stream latency decomposition;
+- single-stream versus pipelined bandwidth roofs;
+- a physical tile-grid view for tiled fabrics;
+- side-by-side hardware comparison;
+- plain-English interpretation and warnings about what is not modeled yet.
+
+Keyboard: `q` quits, `r` refreshes. Changing a selector recalculates immediately; submit the overhead field with Enter.
+
 ## Current scope: M0 + early M1
 
 M0 is an analytical decode roofline. It models:
@@ -52,7 +82,7 @@ python -m pip install -e ".[dev]"
 pytest -q
 ```
 
-## First commands
+## CLI commands
 
 ```bash
 asic-sim list-models
@@ -70,7 +100,7 @@ For a tiled fabric the simulator reports two different bandwidth roofs:
 1. **Single-stream roof**: a conservative token follows sequential transformer dependencies and sees local tile bandwidth plus idealized NoC cost. It does not receive aggregate fabric bandwidth for free.
 2. **Steady-state bandwidth roof**: assumes enough independent sequences to pipeline/load-balance work across all tiles. This may approach aggregate bandwidth, but is an upper bound until the event-driven simulator proves the mapping can sustain it.
 
-That distinction is central to this project. Any architecture that only looks good by confusing aggregate bandwidth with single-token bandwidth should be rejected.
+A second distinction is equally important: **remote expert calls are not remote weight traffic**. Under naive balanced placement, almost every MoE dispatch may target another tile while more than 99.9% of modeled bytes remain local, because the large expert weights stay beside compute and only comparatively small activations cross the mesh.
 
 ## Roadmap
 
