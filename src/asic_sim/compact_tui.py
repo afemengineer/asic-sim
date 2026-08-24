@@ -27,14 +27,23 @@ class CompactAsicSimTui(AsicSimTui):
         text-style: bold;
     }}
 
-    Select, Input {{
+    /* Select owns an internal SelectCurrent widget with its own border.
+       Do not add another border to the outer Select or the selected text
+       gets clipped in this compact three-row layout. */
+    Select {{
+        height: 3;
+        margin-top: 0;
+        background: #0d1012;
+    }}
+
+    Input {{
         height: 3;
         margin-top: 0;
         border: tall #3b4148;
         background: #0d1012;
     }}
 
-    Select:focus, Input:focus {{
+    Input:focus {{
         border: tall {ORANGE};
     }}
 
