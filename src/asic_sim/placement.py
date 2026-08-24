@@ -9,7 +9,13 @@ from .models import ModelSpec
 
 @dataclass(frozen=True, slots=True)
 class ModelDecomposition:
-    """Parameter decomposition inferred from total and active parameter counts."""
+    """Parameter decomposition inferred from published total/active counts.
+
+    Routed-vs-always-on is inferred from the published top-k activation ratio.
+    Shared experts are then carved explicitly out of the always-on pool using
+    the vendor architecture dimensions. This keeps the total/active counts
+    exactly consistent while exposing the shared path as a first-class cost.
+    """
 
     total_parameters: float
     active_parameters: float
@@ -19,6 +25,9 @@ class ModelDecomposition:
     active_always_on_parameters: float
     routed_fraction: float
     expert_shard_parameters: float | None
+    shared_expert_parameters: float
+    shared_expert_parameters_per_moe_layer: float
+    other_always_on_parameters: float
 
 
 def decompose_model(model: ModelSpec) -> ModelDecomposition:
@@ -32,6 +41,9 @@ def decompose_model(model: ModelSpec) -> ModelDecomposition:
             active_always_on_parameters=model.active_parameters,
             routed_fraction=0.0,
             expert_shard_parameters=None,
+            shared_expert_parameters=0.0,
+            shared_expert_parameters_per_moe_layer=0.0,
+            other_always_on_parameters=model.total_parameters,
         )
 
     activation_fraction = model.experts_per_token / model.num_experts
@@ -52,6 +64,14 @@ def decompose_model(model: ModelSpec) -> ModelDecomposition:
     active_always_on = max(0.0, active_always_on)
     shard = routed_pool / (model.moe_layers * model.num_experts)
 
+    explicit_shared = model.shared_expert_parameters_total
+    # Architecture dimensions should fit inside the inferred always-on pool. If
+    # a future model's vendor counts disagree slightly, preserve count
+    # consistency and cap the explicit carve-out rather than going negative.
+    shared = min(always_on, explicit_shared)
+    shared_per_layer = shared / model.moe_layers if model.moe_layers else 0.0
+    other_always_on = max(0.0, always_on - shared)
+
     return ModelDecomposition(
         total_parameters=model.total_parameters,
         active_parameters=model.active_parameters,
@@ -61,6 +81,9 @@ def decompose_model(model: ModelSpec) -> ModelDecomposition:
         active_always_on_parameters=active_always_on,
         routed_fraction=routed_pool / model.total_parameters,
         expert_shard_parameters=shard,
+        shared_expert_parameters=shared,
+        shared_expert_parameters_per_moe_layer=shared_per_layer,
+        other_always_on_parameters=other_always_on,
     )
 
 
