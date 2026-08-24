@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("tui", help="launch the interactive terminal architecture explorer")
     sub.add_parser("list-models", help="show built-in model specifications")
     sub.add_parser("list-hardware", help="show built-in hardware presets")
 
@@ -156,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "tui":
+            from .tui import run_tui
+
+            run_tui()
+            return 0
         if args.command == "list-models":
             _print_model_table()
             return 0
