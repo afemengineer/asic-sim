@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .fabric import build_physical_placement, trace_traffic
 from .formatting import fmt_bytes, fmt_rate, fmt_time_s
 from .hardware import HARDWARE_PRESETS, get_hardware
 from .models import MODEL_SPECS, get_model
@@ -15,10 +16,10 @@ def _percent(value: float) -> str:
 
 
 def _print_model_table() -> None:
-    print("MODEL      TOTAL       ACTIVE      LAYERS  EXPERTS  TOP-K  ARCH")
+    print("MODEL          TOTAL       ACTIVE      LAYERS  EXPERTS  TOP-K  ARCH")
     for spec in MODEL_SPECS.values():
         print(
-            f"{spec.key:<10} {spec.total_parameters / 1e9:>7.0f}B "
+            f"{spec.key:<14} {spec.total_parameters / 1e9:>7.0f}B "
             f"{spec.active_parameters / 1e9:>9.0f}B {spec.num_layers:>7} "
             f"{spec.num_experts:>8} {spec.experts_per_token:>6}  {spec.architecture}"
         )
@@ -113,6 +114,56 @@ def _run_placement(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_traffic(args: argparse.Namespace) -> int:
+    model = get_model(args.model)
+    hardware = get_hardware(args.hardware)
+    placement = build_physical_placement(
+        model,
+        hardware,
+        bits_per_weight=args.bits,
+        overhead_fraction=args.overhead,
+    )
+    traffic = trace_traffic(
+        placement,
+        tokens=args.tokens,
+        profile=args.profile,
+        activation_bits=args.activation_bits,
+        seed=args.seed,
+    )
+
+    print(f"{model.name} -> {hardware.name}")
+    print(f"  physical placement:     {'FIT' if placement.per_tile_resident else 'OVERFLOW'}")
+    print(f"  storage total:          {fmt_bytes(placement.total_storage_bytes)}")
+    print(f"  min/max tile storage:   {fmt_bytes(placement.min_storage_bytes)} / {fmt_bytes(placement.max_storage_bytes)}")
+    print(f"  routing trace:          {traffic.profile}, {traffic.tokens} synthetic token(s)")
+    print(f"  NoC payload/token:      {fmt_bytes(traffic.network_payload_bytes_per_token)}")
+    print(f"  NoC hop-bytes/token:    {fmt_bytes(traffic.hop_bytes_per_token)}")
+    if model.num_experts:
+        print(f"  remote expert calls:    {traffic.remote_expert_fraction:.2%}")
+    print(f"  average physical hops:  {traffic.average_hops:.3f}")
+    print(f"  active directed links:  {traffic.active_directed_links}")
+    if traffic.hottest_link is not None:
+        left, right = traffic.hottest_link
+        print(f"  hottest link:           T{left:02d}->T{right:02d}")
+        print(f"  hot-link bytes/token:   {fmt_bytes(traffic.max_link_bytes_per_token)}")
+        print(f"  hotspot / mean link:    {traffic.hotspot_ratio:.3f}x")
+        if traffic.ideal_hottest_link_time_s is not None:
+            print(f"  ideal hot-link time:    {fmt_time_s(traffic.ideal_hottest_link_time_s)}")
+
+    if args.top_links and traffic.link_bytes_per_token:
+        print("\nTOP LINKS")
+        print("LINK       BYTES/TOKEN")
+        for (left, right), value in traffic.link_bytes_per_token[: args.top_links]:
+            print(f"T{left:02d}->T{right:02d}  {fmt_bytes(value):>12}")
+
+    if args.show_routes and traffic.sample_routes:
+        print("\nSAMPLE ROUTES")
+        for route in traffic.sample_routes:
+            path = " -> ".join(f"T{tile:02d}" for tile in route.path)
+            print(f"token={route.token:>2} layer={route.layer:>2} {route.kind:<8} {path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asic-sim",
@@ -150,6 +201,18 @@ def build_parser() -> argparse.ArgumentParser:
     placement.add_argument("--overhead", type=float, default=0.05)
     placement.add_argument("--activation-bits", type=float, default=16.0)
 
+    traffic = sub.add_parser("traffic", help="run explicit M1 tile placement and mesh traffic tracing")
+    traffic.add_argument("--model", default="kimi-k3")
+    traffic.add_argument("--hardware", default="fabric-64x32")
+    traffic.add_argument("--bits", type=float, default=4.0)
+    traffic.add_argument("--overhead", type=float, default=0.05)
+    traffic.add_argument("--activation-bits", type=float, default=16.0)
+    traffic.add_argument("--tokens", type=int, default=64)
+    traffic.add_argument("--profile", choices=("balanced", "hot", "zipf"), default="balanced")
+    traffic.add_argument("--seed", type=int, default=42)
+    traffic.add_argument("--top-links", type=int, default=10)
+    traffic.add_argument("--show-routes", action="store_true")
+
     return parser
 
 
@@ -174,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_capacity(args)
         if args.command == "placement":
             return _run_placement(args)
+        if args.command == "traffic":
+            return _run_traffic(args)
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))
     return 1
