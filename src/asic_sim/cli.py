@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .architectures import compare_architectures
 from .fabric import build_physical_placement, trace_traffic
 from .formatting import fmt_bytes, fmt_rate, fmt_time_s
 from .hardware import HARDWARE_PRESETS, get_hardware
@@ -16,12 +17,12 @@ def _percent(value: float) -> str:
 
 
 def _print_model_table() -> None:
-    print("MODEL          TOTAL       ACTIVE      LAYERS  EXPERTS  TOP-K  ARCH")
+    print("MODEL          TOTAL       ACTIVE      LAYERS  EXPERTS  TOP-K SHARED  ARCH")
     for spec in MODEL_SPECS.values():
         print(
             f"{spec.key:<14} {spec.total_parameters / 1e9:>7.0f}B "
             f"{spec.active_parameters / 1e9:>9.0f}B {spec.num_layers:>7} "
-            f"{spec.num_experts:>8} {spec.experts_per_token:>6}  {spec.architecture}"
+            f"{spec.num_experts:>8} {spec.experts_per_token:>6} {spec.shared_experts:>6}  {spec.architecture}"
         )
 
 
@@ -105,6 +106,12 @@ def _run_placement(args: argparse.Namespace) -> int:
     print(f"  balanced tile fit:       {'YES' if report.resident_per_tile_balanced else 'NO'}")
     print(f"  routed parameter pool:   {report.routed_pool_parameters / 1e9:,.1f}B ({decomp.routed_fraction:.2%})")
     print(f"  always-on parameters:    {report.always_on_parameters / 1e9:,.1f}B")
+    if model.shared_experts:
+        print(
+            f"  shared experts:          {model.shared_experts}/MoE layer, "
+            f"{decomp.shared_expert_parameters / 1e9:,.2f}B params total"
+        )
+        print(f"  other always-on:         {decomp.other_always_on_parameters / 1e9:,.2f}B params")
     if report.expert_shard_parameters is not None:
         print(f"  expert shard:            {report.expert_shard_parameters / 1e6:,.2f}M params")
         print(f"  expert shards / tile:    {report.expert_shards_min_per_tile}-{report.expert_shards_max_per_tile}")
@@ -164,6 +171,57 @@ def _run_traffic(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_architectures(args: argparse.Namespace) -> int:
+    model = get_model(args.model)
+    hardware = get_hardware(args.hardware)
+    reports = compare_architectures(
+        model,
+        hardware,
+        bits_per_weight=args.bits,
+        shared_expert_bits=args.shared_bits,
+        overhead_fraction=args.overhead,
+        activation_bits=args.activation_bits,
+        tokens=args.tokens,
+        profile=args.profile,
+        seed=args.seed,
+    )
+    shared_bits = args.bits if args.shared_bits is None else args.shared_bits
+    decomp = decompose_model(model)
+
+    print(f"{model.name} -> {hardware.name}")
+    print(f"  base weights:           {args.bits:g} bit + {args.overhead:.1%} overhead")
+    print(f"  shared-expert weights:  {shared_bits:g} bit")
+    if model.shared_experts:
+        print(f"  shared experts:         {model.shared_experts} / MoE layer")
+        print(f"  shared params total:    {decomp.shared_expert_parameters / 1e9:,.3f}B")
+    if reports:
+        print(f"  mixed model storage:    {fmt_bytes(reports[0].total_storage_bytes)}")
+        print(f"  routing profile:        {args.profile}, {args.tokens} synthetic token(s)")
+        print(f"  active routed bytes:    {fmt_bytes(reports[0].routed_active_bytes_per_token)} / token")
+        print(f"  active shared bytes:    {fmt_bytes(reports[0].shared_active_bytes_per_token)} / token")
+        print(f"  other always-on bytes:  {fmt_bytes(reports[0].other_active_bytes_per_token)} / token")
+
+    print("\nARCHITECTURE COMPARISON")
+    print("MODE             FIT   MAX TILE    NOC/TOK     HOP-BYTES   HOTSPOT  MEM FLOOR    MEM ROOF")
+    for report in reports:
+        print(
+            f"{report.label:<16} {'yes' if report.resident else 'NO ':>3}  "
+            f"{fmt_bytes(report.max_tile_storage_bytes):>10}  "
+            f"{fmt_bytes(report.network_payload_bytes_per_token):>10}  "
+            f"{fmt_bytes(report.hop_bytes_per_token):>10}  "
+            f"{report.hotspot_ratio:>6.2f}x  "
+            f"{fmt_time_s(report.ideal_memory_floor_s):>10}  "
+            f"{fmt_rate(report.ideal_memory_roof_tps):>10}"
+        )
+
+    print("\nINTERPRETATION")
+    for report in reports:
+        hot = "none" if report.hottest_link is None else f"T{report.hottest_link[0]:02d}->T{report.hottest_link[1]:02d}"
+        print(f"  {report.label}: hottest={hot}; {report.notes}")
+    print("  MEM FLOOR/ROOF are ideal local-memory-only bounds; compute, NoC timing, barriers, KV and queues are still excluded.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asic-sim",
@@ -213,6 +271,25 @@ def build_parser() -> argparse.ArgumentParser:
     traffic.add_argument("--top-links", type=int, default=10)
     traffic.add_argument("--show-routes", action="store_true")
 
+    architectures = sub.add_parser(
+        "architectures",
+        help="compare layer-pipeline, local-cluster and global expert-mesh mappings",
+    )
+    architectures.add_argument("--model", default="kimi-k3")
+    architectures.add_argument("--hardware", default="fabric-64x32")
+    architectures.add_argument("--bits", type=float, default=4.0)
+    architectures.add_argument(
+        "--shared-bits",
+        type=float,
+        default=None,
+        help="shared-expert precision override; defaults to --bits (try 16 for Kimi's unquantized shared path)",
+    )
+    architectures.add_argument("--overhead", type=float, default=0.05)
+    architectures.add_argument("--activation-bits", type=float, default=16.0)
+    architectures.add_argument("--tokens", type=int, default=64)
+    architectures.add_argument("--profile", choices=("balanced", "hot", "zipf"), default="balanced")
+    architectures.add_argument("--seed", type=int, default=42)
+
     return parser
 
 
@@ -239,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_placement(args)
         if args.command == "traffic":
             return _run_traffic(args)
+        if args.command == "architectures":
+            return _run_architectures(args)
     except (KeyError, ValueError) as exc:
         parser.error(str(exc))
     return 1
