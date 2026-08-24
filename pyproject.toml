@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asic-sim"
-version = "0.3.0"
+version = "0.4.0"
 description = "Fast analytical simulator for memory-stationary LLM inference accelerators"
 requires-python = ">=3.10"
 authors = [{name = "afemengineer"}]
@@ -17,6 +17,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 asic-sim = "asic_sim.cli:main"
 asic-sim-tui = "asic_sim.compact_tui:run_tui"
+asic-sim-sweep = "asic_sim.bandwidth_sweep:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
