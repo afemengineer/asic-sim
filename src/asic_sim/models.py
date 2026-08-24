@@ -88,6 +88,23 @@ def _validate_overhead(overhead: float) -> None:
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
+    "qwen3.8-27b": ModelSpec(
+        key="qwen3.8-27b",
+        name="Qwen3.8-27B",
+        total_parameters=27e9,
+        active_parameters=27e9,
+        num_layers=64,
+        dense_layers=64,
+        hidden_size=5120,
+        context_length=262_144,
+        architecture="Dense hybrid: 48 Gated DeltaNet + 16 gated full-attention layers",
+        source="https://huggingface.co/Qwen/Qwen3.8-27B",
+        notes=(
+            "Official model card reports 27B parameters, hidden size 5120 and 64 layers with a "
+            "16 x [3 Gated DeltaNet + 1 gated full-attention] layout. At generic Q4 plus 5% "
+            "metadata overhead this simulator estimates 14.175 GB of weight storage."
+        ),
+    ),
     "kimi-k3": ModelSpec(
         key="kimi-k3",
         name="Kimi K3",
@@ -150,6 +167,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
 }
 
 ALIASES = {
+    "qwen": "qwen3.8-27b",
+    "qwen27": "qwen3.8-27b",
+    "qwen3.8": "qwen3.8-27b",
+    "qwen3.8-27b": "qwen3.8-27b",
     "k3": "kimi-k3",
     "kimi": "kimi-k3",
     "glm52": "glm-5.2",
