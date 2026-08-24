@@ -34,15 +34,63 @@ class ModelSpec:
     def moe_layers(self) -> int:
         return max(0, self.num_layers - self.dense_layers) if self.num_experts else 0
 
+    @property
+    def shared_expert_parameters_per_moe_layer(self) -> float:
+        """Explicit parameters in the always-active shared-expert MLP.
+
+        Kimi/GLM implement shared experts as one gated MLP whose intermediate
+        width is moe_intermediate_size * shared_experts. A gated MLP has gate,
+        up and down matrices, hence 3 * hidden * intermediate parameters.
+        """
+        if not self.shared_experts or not self.moe_intermediate_size or not self.moe_layers:
+            return 0.0
+        return 3.0 * self.hidden_size * self.moe_intermediate_size * self.shared_experts
+
+    @property
+    def shared_expert_parameters_total(self) -> float:
+        return self.shared_expert_parameters_per_moe_layer * self.moe_layers
+
     def storage_bytes(self, bits_per_weight: float, overhead_fraction: float = 0.0) -> float:
         _validate_bits(bits_per_weight)
         _validate_overhead(overhead_fraction)
         return self.total_parameters * bits_per_weight / 8.0 * (1.0 + overhead_fraction)
 
+    def mixed_storage_bytes(
+        self,
+        bits_per_weight: float,
+        overhead_fraction: float = 0.0,
+        *,
+        shared_expert_bits: float | None = None,
+    ) -> float:
+        """Weight storage with an optional precision override for shared experts."""
+        base = self.storage_bytes(bits_per_weight, overhead_fraction)
+        if shared_expert_bits is None or not self.shared_expert_parameters_total:
+            return base
+        _validate_bits(shared_expert_bits)
+        scale = 1.0 + overhead_fraction
+        delta_bits = shared_expert_bits - bits_per_weight
+        return base + self.shared_expert_parameters_total * delta_bits / 8.0 * scale
+
     def active_weight_bytes(self, bits_per_weight: float, overhead_fraction: float = 0.0) -> float:
         _validate_bits(bits_per_weight)
         _validate_overhead(overhead_fraction)
         return self.active_parameters * bits_per_weight / 8.0 * (1.0 + overhead_fraction)
+
+    def mixed_active_weight_bytes(
+        self,
+        bits_per_weight: float,
+        overhead_fraction: float = 0.0,
+        *,
+        shared_expert_bits: float | None = None,
+    ) -> float:
+        """Active weight bytes with optional higher/lower shared-expert precision."""
+        base = self.active_weight_bytes(bits_per_weight, overhead_fraction)
+        if shared_expert_bits is None or not self.shared_expert_parameters_total:
+            return base
+        _validate_bits(shared_expert_bits)
+        scale = 1.0 + overhead_fraction
+        delta_bits = shared_expert_bits - bits_per_weight
+        return base + self.shared_expert_parameters_total * delta_bits / 8.0 * scale
 
     def hidden_bytes(self, activation_bits: float = 16.0) -> float:
         _validate_bits(activation_bits)
@@ -121,9 +169,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         architecture="MoE: 69 KDA + 24 gated MLA attention layers, Latent MoE",
         source="https://huggingface.co/moonshotai/Kimi-K3",
         notes=(
-            "Vendor reports 2.8T total / 104B active parameters. Official release uses "
-            "MXFP4 for many linear weights, but some modules are excluded from that quantization; "
-            "generic bit-width sizing here is therefore a lower-order architectural estimate."
+            "Vendor reports 2.8T total / 104B active parameters and 2 shared experts per MoE layer. "
+            "The released MXFP4 config explicitly excludes shared_experts (and several other modules) "
+            "from 4-bit quantization, so uniform-bit sizing is an optimistic research abstraction."
         ),
     ),
     "glm-5.2": ModelSpec(
@@ -141,7 +189,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         context_length=1_000_000,
         architecture="MoE + DSA/IndexShare",
         source="https://huggingface.co/zai-org/GLM-5.2",
-        notes="744B-A40B configuration; 3 dense + 75 MoE layers.",
+        notes="744B-A40B configuration; 3 dense + 75 MoE layers; 1 always-active shared expert per MoE layer.",
     ),
     "glm-5.3": ModelSpec(
         key="glm-5.3",
@@ -161,7 +209,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         notes=(
             "Z.ai states GLM-5.3 uses the same base model as GLM-5.2 and changes post-training only. "
             "Until the GLM-5.3 weights/config are published, this preset intentionally aliases the "
-            "GLM-5.2 base architecture."
+            "GLM-5.2 base architecture, including 1 shared expert per MoE layer."
         ),
     ),
 }
