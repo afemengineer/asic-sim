@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "tui":
-            from .tui import run_tui
+            from .compact_tui import run_tui
 
             run_tui()
             return 0
