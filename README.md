@@ -34,6 +34,24 @@ The TUI provides:
 
 Keyboard: `q` quits, `r` refreshes. Changing a selector recalculates immediately; submit the overhead field with Enter.
 
+## Prefill economics simulator
+
+The repository now also contains a separate prefill roofline/economics model. Its purpose is not to design an ASIC; it asks whether a hypothetical prefill accelerator has enough **input-token/€** advantage to justify further architecture work.
+
+```bash
+asic-sim-prefill --model kimi-k3 --tokens 32768
+
+asic-sim-prefill \
+  --model kimi-k3 \
+  --tokens 32768 \
+  --candidate-bandwidth-tb-s 2 \
+  --sweep-compute 1 2 4 8 16 32 64
+```
+
+It reports compute time, memory time, bottleneck, input tok/s, arithmetic intensity, and CAPEX ceilings for parity / 3x / 5x input-token economics against selectable purchasable GPU-node references. Current references include an EU HGX B300 purchase baseline and an EU MI355X asking-price baseline; each price is timestamped and linked to its source.
+
+See [`docs/PREFILL_ECONOMICS.md`](docs/PREFILL_ECONOMICS.md) for assumptions, current purchase-price sources, TCO controls and interpretation.
+
 ## Current scope: M0 + early M1
 
 M0 is an analytical decode roofline. It models:
@@ -91,6 +109,7 @@ asic-sim compare --model glm-5.2 --bits 4
 asic-sim compare --model kimi-k3 --hardware fabric-64x32 --bits 4
 asic-sim placement --model kimi-k3 --hardware fabric-64x32 --bits 4
 asic-sim compare --model kimi-k3 --hardware fabric-32x32 --bits 2.75 --overhead 0.05
+asic-sim-prefill --model kimi-k3 --tokens 32768
 ```
 
 ## Important interpretation
