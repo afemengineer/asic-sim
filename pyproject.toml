@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asic-sim"
+version = "1.4.0"
+description = "Fast analytical simulator for memory-stationary LLM inference accelerators"
+requires-python = ">=3.10"
+authors = [{name = "afemengineer"}]
+license = {text = "MIT"}
+dependencies = ["textual>=1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+asic-sim = "asic_sim.cli:main"
+asic-sim-tui = "asic_sim.compact_tui:run_tui"
+asic-sim-sweep = "asic_sim.bandwidth_sweep:main"
+asic-sim-m2 = "asic_sim.m2:main"
+asic-sim-m2-net = "asic_sim.m2_network_models:main"
+asic-sim-m3 = "asic_sim.m3:main"
+asic-sim-m3-compute = "asic_sim.m3_compute_sweep:main"
+asic-sim-m4 = "asic_sim.m4_heterogeneous:main"
+asic-sim-m5 = "asic_sim.m5_commercial:main"
+asic-sim-m5-rightsize = "asic_sim.m5_rightsize:main"
+asic-sim-prefill = "asic_sim.prefill:main"
+asic-sim-prefill-space = "asic_sim.prefill_design_space:main"
+asic-sim-prefill-bom = "asic_sim.prefill_bom_gate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
