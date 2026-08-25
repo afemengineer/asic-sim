@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asic-sim"
-version = "1.3.0"
+version = "1.4.0"
 description = "Fast analytical simulator for memory-stationary LLM inference accelerators"
 requires-python = ">=3.10"
 authors = [{name = "afemengineer"}]
@@ -27,6 +27,7 @@ asic-sim-m5 = "asic_sim.m5_commercial:main"
 asic-sim-m5-rightsize = "asic_sim.m5_rightsize:main"
 asic-sim-prefill = "asic_sim.prefill:main"
 asic-sim-prefill-space = "asic_sim.prefill_design_space:main"
+asic-sim-prefill-bom = "asic_sim.prefill_bom_gate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
